@@ -326,9 +326,10 @@ object LanLibraryTransfer {
                                         if (count == 0) continue
                                         output.write(buffer, 0, count)
                                         fileBytesDone += count
-                                        val currentTotal = totalBytesDone.addAndGet(count)
+                                        totalBytesDone.addAndGet(count)
                                         val now = SystemClock.elapsedRealtime()
                                         synchronized(progressLock) {
+                                            val currentTotal = totalBytesDone.get()
                                             if (now - lastProgressAt >= 250L) {
                                                 onProgress(TransferProgress(
                                                     bytesDone = currentTotal,
