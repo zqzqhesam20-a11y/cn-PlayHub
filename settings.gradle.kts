@@ -14,6 +14,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "KafiaNetControlPro2"
+rootProject.name = "cn-PlayHub"
 
 include(":app")

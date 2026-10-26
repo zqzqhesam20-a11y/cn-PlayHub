@@ -175,7 +175,7 @@ private fun PasswordGate(onUnlock: () -> Unit) {
                 Text("KN", color = Color(0xFF102015), fontSize = 27.sp, fontWeight = FontWeight.Black)
             }
             Spacer(Modifier.height(20.dp))
-            Text("كافية نت", fontSize = 31.sp, fontWeight = FontWeight.Black, color = Color.White)
+            Text("cn-PlayHub", fontSize = 31.sp, fontWeight = FontWeight.Black, color = Color.White)
             Text("هشام الريمي", fontSize = 15.sp, color = Neon, modifier = Modifier.padding(top = 4.dp))
             Spacer(Modifier.height(28.dp))
             Text("أدخل كلمة المرور", fontSize = 19.sp, fontWeight = FontWeight.Bold)
@@ -432,7 +432,7 @@ private fun TransferDashboard(shizukuRevision: Int) {
         if (transferBusy) return
         if (hosting) { status = "أوقف مشاركة الهاتف قبل بدء نسخ USB"; return }
         if (!ShizukuHelper.hasPermission()) {
-            status = "شغّل Shizuku وامنح كافية نت الإذن للوصول إلى مسارات الألعاب الثابتة"
+            status = "شغّل Shizuku وامنح cn-PlayHub الإذن للوصول إلى مسارات الألعاب الثابتة"
             return
         }
         runCatching { ShizukuServiceConnection.bind() }
@@ -550,7 +550,7 @@ private fun TransferDashboard(shizukuRevision: Int) {
             return
         }
         if (!ShizukuHelper.hasPermission()) {
-            status = "شغّل Shizuku وامنح كافية نت الإذن للكتابة إلى مسار اللعبة"
+            status = "شغّل Shizuku وامنح cn-PlayHub الإذن للكتابة إلى مسار اللعبة"
             return
         }
         ShizukuServiceConnection.bind()
@@ -588,7 +588,7 @@ private fun TransferDashboard(shizukuRevision: Int) {
         if (hosting) return
         if (transferBusy) { status = "انتظر انتهاء النسخ الحالي"; return }
         if (!ShizukuHelper.hasPermission()) {
-            status = "شغّل Shizuku وامنح كافية نت الإذن لقراءة «العابي» تلقائيًا"
+            status = "شغّل Shizuku وامنح cn-PlayHub الإذن لقراءة «العابي» تلقائيًا"
             return
         }
         runCatching { ShizukuServiceConnection.bind() }
@@ -654,7 +654,7 @@ private fun TransferDashboard(shizukuRevision: Int) {
     fun downloadRemoteGame(game: HotspotTransfer.RemoteGame) {
         if (transferBusy) return
         if (!ShizukuHelper.hasPermission()) {
-            status = "شغّل Shizuku وامنح كافية نت الإذن للنسخ إلى المسار المسجل للعبة"
+            status = "شغّل Shizuku وامنح cn-PlayHub الإذن للنسخ إلى المسار المسجل للعبة"
             return
         }
         runCatching { ShizukuServiceConnection.bind() }
@@ -866,7 +866,7 @@ private fun AppHeader(shizukuRevision: Int, onRequestShizuku: () -> Unit) {
             }
             Spacer(Modifier.width(13.dp))
             Column(Modifier.weight(1f)) {
-                Text("كافية نت", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Black)
+                Text("cn-PlayHub", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Black)
                 Text("هشام الريمي  •  مركز نقل الألعاب", color = Neon, fontSize = 11.sp)
             }
             Column(

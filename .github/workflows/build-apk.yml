@@ -1,0 +1,78 @@
+name: Build cn-PlayHub APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cn-playhub-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Android Release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Normalize JPEG game images with incorrect PNG extensions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          drawable_dir = Path("app/src/main/res/drawable")
+          renamed = 0
+          for image in sorted(drawable_dir.glob("*.png")):
+              with image.open("rb") as stream:
+                  signature = stream.read(3)
+              if signature == bytes((0xFF, 0xD8, 0xFF)):
+                  destination = image.with_suffix(".jpg")
+                  if destination.exists():
+                      raise RuntimeError(f"Won't overwrite existing resource: {destination}")
+                  image.rename(destination)
+                  print(f"Renamed mislabeled JPEG resource: {image.name} -> {destination.name}")
+                  renamed += 1
+          print(f"Normalized {renamed} JPEG resource file(s).")
+
+          PY
+
+      - name: Build Release APK
+        run: gradle --no-daemon clean assembleRelease
+
+      - name: Prepare named APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_apk="app/build/outputs/apk/release/app-release.apk"
+          test -s "${source_apk}"
+          cp "${source_apk}" "app/build/outputs/apk/release/cn-PlayHub.apk"
+          ls -lh "app/build/outputs/apk/release/cn-PlayHub.apk"
+
+      - name: Upload APK to this workflow run (no GitHub Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cn-PlayHub-APK-${{ github.run_number }}-${{ github.run_attempt }}
+          path: app/build/outputs/apk/release/cn-PlayHub.apk
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

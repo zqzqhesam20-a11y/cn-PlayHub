@@ -88,7 +88,7 @@ class TransferForegroundService : Service() {
             )
             return NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.stat_sys_upload)
-                .setContentTitle("كافية نت")
+                .setContentTitle("cn-PlayHub")
                 .setContentText(text.take(140))
                 .setContentIntent(openApp)
                 .addAction(android.R.drawable.ic_menu_close_clear_cancel, "إلغاء النقل", cancelTransfer)
