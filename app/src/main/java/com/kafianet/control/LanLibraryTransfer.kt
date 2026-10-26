@@ -313,7 +313,9 @@ object LanLibraryTransfer {
                 // requires signing, the caller falls back to the compatible signed client.
                 val smbjConfig = SmbConfig.builder()
                     .withReadBufferSize(8 * 1024 * 1024)
+                    .withMultiProtocolNegotiate(true)
                     .withSigningEnabled(false)
+                    .withSigningRequired(false)
                     .withDialects(SMB2Dialect.SMB_2_1, SMB2Dialect.SMB_2_0_2)
                     .withTimeout(120, TimeUnit.SECONDS)
                     .withSoTimeout(120, TimeUnit.SECONDS)
