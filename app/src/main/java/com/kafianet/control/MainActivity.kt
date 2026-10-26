@@ -42,9 +42,11 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
 import java.io.File
 import java.io.IOException
@@ -221,6 +223,8 @@ private fun TransferDashboard(shizukuRevision: Int) {
     var status by remember { mutableStateOf("جاهز — اختر طريقة النسخ أو النقل") }
     var transferBusy by remember { mutableStateOf(false) }
     var hosting by remember { mutableStateOf(false) }
+    var browserShareServer by remember { mutableStateOf<BrowserShareServer?>(null) }
+    var browserShareUrl by remember { mutableStateOf("") }
     var progress by remember { mutableStateOf(TransferProgress()) }
     var transferJob by remember { mutableStateOf<Job?>(null) }
     var hostJob by remember { mutableStateOf<Job?>(null) }
@@ -620,8 +624,81 @@ private fun TransferDashboard(shizukuRevision: Int) {
         hostJob?.cancel()
         hostJob = null
         hosting = false
-        TransferForegroundService.stop(context)
+        if (browserShareServer == null && !transferBusy) TransferForegroundService.stop(context)
         status = "تم إيقاف مشاركة مكتبة الألعاب"
+    }
+
+    fun openBrowserShare() {
+        val url = browserShareUrl
+        if (url.isBlank() || browserShareServer == null) {
+            status = "ابدأ مشاركة مجلد التطبيقات أولًا"
+            return
+        }
+        runCatching {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        }.onFailure { error ->
+            status = "تعذّر فتح المتصفح: " + (error.message ?: error.javaClass.simpleName)
+        }
+    }
+
+    fun startBrowserShare() {
+        if (browserShareServer != null) {
+            openBrowserShare()
+            return
+        }
+        if (transferBusy || hosting) {
+            status = "أوقف النقل أو مشاركة الهاتف الحالية قبل بدء مشاركة المتصفح"
+            return
+        }
+        if (!ShizukuHelper.hasPermission()) {
+            status = "شغّل Shizuku وامنح cn-PlayHub الإذن لمشاركة مجلد التطبيقات"
+            return
+        }
+        val bindIp = HotspotTransfer.localIpv4Addresses().firstOrNull()
+        if (bindIp.isNullOrBlank()) {
+            status = "اتصل بشبكة Wi-Fi أو فعّل نقطة الاتصال الشخصية ثم أعد المحاولة"
+            return
+        }
+
+        val root = File(GameCatalog.sourceLibraryPath, "تطبيقات").absolutePath
+        val token = java.util.UUID.randomUUID().toString().replace("-", "")
+        status = "جارٍ تجهيز مشاركة العابي/تطبيقات عبر المتصفح…"
+        scope.launch {
+            try {
+                HotspotTransfer.ensureShizukuReady()
+                val server = withContext(Dispatchers.IO) {
+                    if (ShizukuServiceConnection.pathType(root) != 2) {
+                        throw IOException("لم يُعثر على المجلد المطلوب: " + root)
+                    }
+                    BrowserShareServer(root, bindIp, BrowserShareServer.PORT, token).also { it.startServer() }
+                }
+                browserShareServer = server
+                browserShareUrl = server.shareUrl
+                TransferForegroundService.start(context, "مشاركة مجلد العابي/تطبيقات عبر المتصفح")
+                status = "تم فتح منفذ مشاركة التطبيقات: " + server.shareUrl
+                openBrowserShare()
+            } catch (cancelled: CancellationException) {
+                status = "أُلغيت مشاركة المتصفح"
+                throw cancelled
+            } catch (error: Exception) {
+                browserShareServer?.stop()
+                browserShareServer = null
+                browserShareUrl = ""
+                status = "تعذّر تشغيل مشاركة المتصفح: " + (error.message ?: error.javaClass.simpleName)
+            }
+        }
+    }
+
+    fun stopBrowserShare() {
+        browserShareServer?.stop()
+        browserShareServer = null
+        browserShareUrl = ""
+        if (!hosting && !transferBusy) TransferForegroundService.stop(context)
+        status = "تم إيقاف مشاركة مجلد العابي/تطبيقات"
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { browserShareServer?.stop() }
     }
 
     fun connectAndListGames() {
@@ -767,6 +844,11 @@ private fun TransferDashboard(shizukuRevision: Int) {
                     phoneRole = phoneRole,
                     onRoleChange = { phoneRole = it; if (it == "receiver") remoteGames = emptyList() },
                     hosting = hosting,
+                    browserSharing = browserShareServer != null,
+                    browserShareUrl = browserShareUrl,
+                    onStartBrowserShare = ::startBrowserShare,
+                    onOpenBrowserShare = ::openBrowserShare,
+                    onStopBrowserShare = ::stopBrowserShare,
                     busy = transferBusy,
                     status = status,
                     progress = progress,
@@ -973,7 +1055,10 @@ private fun LanLibraryPage(
 @Composable
 private fun PhoneTransferPage(
     phoneRole: String, onRoleChange: (String) -> Unit,
-    hosting: Boolean, busy: Boolean, status: String, progress: TransferProgress,
+    hosting: Boolean,
+    browserSharing: Boolean, browserShareUrl: String,
+    onStartBrowserShare: () -> Unit, onOpenBrowserShare: () -> Unit, onStopBrowserShare: () -> Unit,
+    busy: Boolean, status: String, progress: TransferProgress,
     localIps: List<String>, sourceIp: String,
     remoteGames: List<HotspotTransfer.RemoteGame>, onSourceIpChange: (String) -> Unit,
     onRefreshIps: () -> Unit, onStartHosting: () -> Unit, onStopHosting: () -> Unit,
@@ -992,9 +1077,27 @@ private fun PhoneTransferPage(
                     Text("مصدر الألعاب", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     Text(GameCatalog.sourceLibraryPath, color = Neon, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text("فعّل نقطة الاتصال الشخصية يدويًا قبل البدء.", color = Muted, fontSize = 10.sp)
-                    Button(onClick = onStartHosting, enabled = !hosting && !busy,
+                    Button(onClick = onStartHosting, enabled = !hosting && !busy && !browserSharing,
                         modifier = Modifier.fillMaxWidth().height(49.dp), shape = RoundedCornerShape(14.dp)) {
                         Text(if (hosting) "مشاركة الهاتف نشطة" else "بدء مشاركة الهاتف", fontWeight = FontWeight.Bold)
+                    }
+                    OutlinedButton(
+                        onClick = onStartBrowserShare,
+                        enabled = !hosting && !busy && !browserSharing,
+                        modifier = Modifier.fillMaxWidth().height(49.dp),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text(if (browserSharing) "مشاركة التطبيقات نشطة" else "مشاركة مجلد التطبيقات عبر المتصفح", fontWeight = FontWeight.Bold)
+                    }
+                    if (browserSharing) {
+                        Text("مجلد المشاركة: العابي/تطبيقات", color = Neon, fontSize = 11.sp)
+                        CopyAddressRow(browserShareUrl)
+                        OutlinedButton(onClick = onOpenBrowserShare, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(13.dp)) {
+                            Text("فتح رابط المشاركة في المتصفح")
+                        }
+                        OutlinedButton(onClick = onStopBrowserShare, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(13.dp)) {
+                            Text("إيقاف مشاركة المتصفح", color = Danger)
+                        }
                     }
                     if (hosting) {
                         localIps.forEach { ip -> CopyAddressRow("$ip:${HotspotTransfer.PORT}") }

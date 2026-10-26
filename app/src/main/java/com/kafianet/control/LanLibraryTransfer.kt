@@ -5,6 +5,7 @@ import android.content.Context
 import com.hierynomus.msdtyp.AccessMask
 import com.hierynomus.msfscc.FileAttributes
 import com.hierynomus.mssmb2.SMB2CreateDisposition
+import com.hierynomus.mssmb2.SMB2Dialect
 import com.hierynomus.mssmb2.SMB2CreateOptions
 import com.hierynomus.mssmb2.SMB2ShareAccess
 import com.hierynomus.smbj.SMBClient
@@ -307,8 +308,13 @@ object LanLibraryTransfer {
             val workerCount = minOf(SMB_COPY_WORKERS, fileEntries.size)
 
             suspend fun copyUsingSmbj() = coroutineScope {
+                // Known Android throughput issue: SMBJ can stall badly with SMB3 packet signing.
+                // Try fast SMB 2.1 without SMB signing on the trusted local LAN; if server policy
+                // requires signing, the caller falls back to the compatible signed client.
                 val smbjConfig = SmbConfig.builder()
-                    .withReadBufferSize(4 * 1024 * 1024)
+                    .withReadBufferSize(8 * 1024 * 1024)
+                    .withSigningEnabled(false)
+                    .withDialects(SMB2Dialect.SMB_2_1, SMB2Dialect.SMB_2_0_2)
                     .withTimeout(120, TimeUnit.SECONDS)
                     .withSoTimeout(120, TimeUnit.SECONDS)
                     .build()
@@ -424,14 +430,14 @@ object LanLibraryTransfer {
 
             var smbjSucceeded = false
             try {
-                onStatus("بدء النقل عبر SMBJ (SMB2/SMB3) باستخدام $workerCount عمال متوازيين")
+                onStatus("تجربة SMB2.1 السريع عبر SMBJ (بدون توقيع الحزم) — $workerCount عمال، قراءة 8 ميغابايت")
                 copyUsingSmbj()
                 smbjSucceeded = true
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
                 ensureTransferActive(transferContext)
                 onStatus(
-                    "تعذّر إكمال نقل SMBJ؛ ستُعاد المحاولة بمكتبة التوافق القديمة. " +
+                    "تعذّر وضع SMB2.1 السريع؛ سبب المحاولة البديلة: " +
                         (error.message ?: error.javaClass.simpleName)
                 )
 
