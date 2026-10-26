@@ -44,6 +44,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
+    implementation("com.hierynomus:smbj:0.14.0")
     implementation("eu.agno3.jcifs:jcifs-ng:2.1.10")
 
     implementation(platform("androidx.compose:compose-bom:2025.01.00"))
