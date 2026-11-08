@@ -17,4 +17,8 @@ interface IShizukuFileService {
     void prepareCopy() = 8;
     void cancelCopy() = 9;
     String moveDirectoryWithProgressAndVerify(String source, String destination, IShizukuProgressListener listener) = 10;
+    boolean ensureGameDirectory(String path) = 11;
+    ParcelFileDescriptor openTemporaryGameFile(String destinationPath, String temporaryPath) = 12;
+    String commitTemporaryGameFile(String temporaryPath, String destinationPath, long expectedBytes) = 13;
+    boolean deleteTemporaryGameFile(String path) = 14;
 }
