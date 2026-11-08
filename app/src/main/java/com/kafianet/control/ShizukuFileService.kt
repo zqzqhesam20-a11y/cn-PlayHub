@@ -16,6 +16,37 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class ShizukuFileService : IShizukuFileService.Stub() {
 
+    // Android emulated storage can canonicalize "Android" as "android".
+    // Compare case-insensitively only on /storage/emulated; all other paths stay strict.
+    private fun isEmulatedStoragePath(path: String): Boolean =
+        path.startsWith("/storage/emulated/", ignoreCase = true)
+
+    private fun sameCanonicalPath(first: String, second: String): Boolean =
+        if (isEmulatedStoragePath(first) && isEmulatedStoragePath(second)) {
+            first.equals(second, ignoreCase = true)
+        } else {
+            first == second
+        }
+
+    private fun isInsideCanonicalRoot(root: File, candidate: File): Boolean {
+        val rootPath = root.path.trimEnd(File.separatorChar)
+        val candidatePath = candidate.path
+        if (sameCanonicalPath(rootPath, candidatePath)) return true
+        val prefix = rootPath + File.separator
+        val ignoreCase = isEmulatedStoragePath(rootPath)
+        return candidatePath.regionMatches(0, prefix, 0, prefix.length, ignoreCase)
+    }
+
+    private fun relativeToCanonicalRoot(root: File, candidate: File): String {
+        if (sameCanonicalPath(root.path, candidate.path)) return ""
+        val prefix = root.path.trimEnd(File.separatorChar) + File.separator
+        val ignoreCase = isEmulatedStoragePath(root.path)
+        if (!candidate.path.regionMatches(0, prefix, 0, prefix.length, ignoreCase)) {
+            throw IOException("العنصر خارج جذر المسار المعتمد: $candidate")
+        }
+        return candidate.path.substring(prefix.length).replace(File.separatorChar, '/')
+    }
+
     private data class CopyEntry(val file: File, val relativePath: String, val directory: Boolean, val sizeBytes: Long = 0L)
     private val copyCancelled = AtomicBoolean(false)
 
@@ -94,8 +125,8 @@ class ShizukuFileService : IShizukuFileService.Stub() {
             val sourceRoot = File(source).canonicalFile
             val destinationRoot = File(destination).canonicalFile
             if (!sourceRoot.isDirectory) throw IOException("مصدر النسخ غير موجود أو غير مجلد: $sourceRoot")
-            if (sourceRoot == destinationRoot ||
-                destinationRoot.path.startsWith(sourceRoot.path + File.separator)
+            if (sameCanonicalPath(sourceRoot.path, destinationRoot.path) ||
+                isInsideCanonicalRoot(sourceRoot, destinationRoot)
             ) {
                 throw IOException("وجهة النسخ تقع داخل مجلد المصدر؛ أُوقف النسخ لمنع التكرار")
             }
@@ -116,12 +147,11 @@ class ShizukuFileService : IShizukuFileService.Stub() {
                 if (copyCancelled.get()) throw CancellationException("أوقف المستخدم النسخ أثناء حساب الحجم")
                 if (depth > MAX_DEPTH) throw IOException("تداخل المجلدات تجاوز الحد $MAX_DEPTH")
                 val canonical = node.canonicalFile
-                if (canonical.path != sourceRoot.path && !canonical.path.startsWith(sourcePrefix)) {
+                if (!isInsideCanonicalRoot(sourceRoot, canonical)) {
                     throw IOException("رُفض عنصر خارج مجلد المصدر: $node")
                 }
                 if (!canonical.exists()) throw IOException("اختفى عنصر من المصدر أثناء حساب الحجم: $canonical")
-                val relative = if (canonical == sourceRoot) "" else
-                    canonical.path.removePrefix(sourcePrefix).replace(File.separatorChar, '/')
+                val relative = relativeToCanonicalRoot(sourceRoot, canonical)
 
                 when {
                     canonical.isDirectory -> {
@@ -188,7 +218,9 @@ class ShizukuFileService : IShizukuFileService.Stub() {
             for (entry in entries) {
                 if (copyCancelled.get()) throw CancellationException("أوقف المستخدم النسخ")
                 val target = File(destinationRoot, entry.relativePath).canonicalFile
-                if (!target.path.startsWith(destinationRoot.path + File.separator)) {
+                if (sameCanonicalPath(destinationRoot.path, target.path) ||
+                    !isInsideCanonicalRoot(destinationRoot, target)
+                ) {
                     throw IOException("مسار الوجهة غير آمن: ${entry.relativePath}")
                 }
 
