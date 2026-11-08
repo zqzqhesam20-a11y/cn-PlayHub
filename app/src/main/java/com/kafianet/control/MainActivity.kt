@@ -623,16 +623,25 @@ private fun TransferDashboard(shizukuRevision: Int) {
             try {
                 status = "جارٍ التحقق من جاهزية خدمة Shizuku قبل تنزيل اللعبة من السيرفر"
                 HotspotTransfer.ensureShizukuReady()
-                val parent = File(
-                    context.getExternalFilesDir(null) ?: context.filesDir,
-                    "KafiaNet/TransferStaging/NetworkShare"
-                )
-                val stagedGame = LanLibraryTransfer.copyGameToStaging(
-                    game, parent, ::updateProgress, ::updateStatus
-                )
-                staged = stagedGame
-                HotspotTransfer.copyStagedGameToTargets(stagedGame, game, ::updateProgress, ::updateStatus)
-                status = "اكتمل نسخ " + game.arabic + " من السيرفر إلى " + game.destinationLabel
+                if (game.targetPaths.size == 1) {
+                    LanLibraryTransfer.copyGameDirectToTargets(
+                        game, ::updateProgress, ::updateStatus
+                    )
+                    status = "اكتمل نسخ " + game.arabic + " مباشرة إلى " + game.destinationLabel
+                } else {
+                    // Multi-destination games (for example data + OBB) retain their
+                    // routing stage; single-destination games never use app storage staging.
+                    val parent = File(
+                        context.getExternalFilesDir(null) ?: context.filesDir,
+                        "KafiaNet/TransferStaging/NetworkShare"
+                    )
+                    val stagedGame = LanLibraryTransfer.copyGameToStaging(
+                        game, parent, ::updateProgress, ::updateStatus
+                    )
+                    staged = stagedGame
+                    HotspotTransfer.copyStagedGameToTargets(stagedGame, game, ::updateProgress, ::updateStatus)
+                    status = "اكتمل نسخ " + game.arabic + " من السيرفر إلى " + game.destinationLabel
+                }
             } catch (cancelled: CancellationException) {
                 status = "أُوقف النسخ من السيرفر"
                 throw cancelled
