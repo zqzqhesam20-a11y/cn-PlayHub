@@ -1,6 +1,7 @@
 package com.kafianet.control
 
 import android.content.Context
+import android.os.ParcelFileDescriptor
 
 import jcifs.config.PropertyConfiguration
 import jcifs.context.BaseContext
@@ -412,6 +413,275 @@ object LanLibraryTransfer {
             runCatching { staging.deleteRecursively() }
             throw error
         }
+    }
+
+
+    /**
+     * Streams SMB files directly into the fixed game destination through Shizuku.
+     * No app-owned TransferStaging directory is created for single-destination games.
+     * Each payload is written to a sibling partial file and atomically committed only
+     * after the received byte count has been verified.
+     */
+    suspend fun copyGameDirectToTargets(
+        game: GameItem,
+        onProgress: (TransferProgress) -> Unit,
+        onStatus: (String) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        if (game.targetPaths.size != 1) {
+            throw IOException("النسخ المباشر يتطلب وجهة واحدة لهذه اللعبة")
+        }
+        if (!ShizukuServiceConnection.isReady()) {
+            throw IOException("خدمة Shizuku ليست جاهزة للكتابة المباشرة")
+        }
+        if (!ShizukuServiceConnection.prepareCopy()) {
+            throw IOException("تعذّر تهيئة خدمة Shizuku للنسخ المباشر؛ أعد ربط الخدمة")
+        }
+
+        val transferContext = currentCoroutineContext()
+        val root = shareRoot(createContext())
+        if (!root.exists() || !root.isDirectory) {
+            throw IOException("تعذّر فتح المشاركة " + UNC_PATH + "؛ تحقق من الشبكة وصلاحية Guest.")
+        }
+        val folder = SmbFile(root, CopyEngine.safeRelativeSegment(game.sourceFolder) + "/")
+        if (!folder.exists() || !folder.isDirectory) {
+            throw IOException("لم يُعثر على مجلد اللعبة في " + UNC_PATH + ": " + game.sourceFolder)
+        }
+
+        data class SourceEntry(
+            val source: SmbFile,
+            val relativePath: String,
+            val directory: Boolean,
+            val sizeBytes: Long = 0L
+        )
+
+        val manifest = ArrayList<SourceEntry>()
+        val seenPaths = HashSet<String>()
+        var scanFiles = 0
+        var totalBytes = 0L
+        var lastScanProgressAt = 0L
+        var lastScanStatusAt = 0L
+        onStatus("فحص كامل ملفات اللعبة على السيرفر قبل الكتابة المباشرة إلى وجهتها النهائية")
+        onProgress(TransferProgress(phase = "الفحص الأولي: حساب الحجم الكامل وعدد الملفات قبل النسخ"))
+
+        fun scan(directory: SmbFile, prefix: String, depth: Int, knownChildren: Array<SmbFile>? = null) {
+            ensureTransferActive(transferContext)
+            if (depth > MAX_DEPTH) throw IOException("المجلدات متداخلة أكثر من الحد المسموح.")
+            val children = knownChildren ?: directory.listFiles()
+            for (child in children) {
+                ensureTransferActive(transferContext)
+                val rawName = child.name.trimEnd('/').trim()
+                val name = CopyEngine.safeRelativeSegment(rawName)
+                val relative = if (prefix.isEmpty()) name else prefix + "/" + name
+                val safeRelative = CopyEngine.safeRelativePath(relative)
+                if (!seenPaths.add(safeRelative)) {
+                    throw IOException("تكرر مسار داخل مصدر اللعبة: " + safeRelative)
+                }
+                if (child.isDirectory) {
+                    manifest.add(SourceEntry(child, safeRelative, true))
+                    scan(child, safeRelative, depth + 1)
+                } else if (child.isFile) {
+                    if (prefix.isEmpty() && rawName.endsWith(".apk", ignoreCase = true)) continue
+                    if (scanFiles >= MAX_FILES) {
+                        throw IOException("عدد ملفات اللعبة يتجاوز الحد المسموح (" + MAX_FILES + ").")
+                    }
+                    val size = child.length()
+                    if (size < 0L) throw IOException("تعذّر قراءة حجم الملف: " + safeRelative)
+                    totalBytes = try {
+                        Math.addExact(totalBytes, size)
+                    } catch (_: ArithmeticException) {
+                        throw IOException("إجمالي حجم اللعبة أكبر من الحد الآمن.")
+                    }
+                    if (totalBytes > MAX_TOTAL_BYTES) throw IOException("حجم اللعبة يتجاوز الحد الآمن.")
+                    scanFiles++
+                    manifest.add(SourceEntry(child, safeRelative, false, size))
+                    val now = SystemClock.elapsedRealtime()
+                    if (scanFiles == 1 || now - lastScanProgressAt >= 250L) {
+                        onProgress(TransferProgress(
+                            filesDone = scanFiles,
+                            totalFiles = 0,
+                            currentFile = safeRelative,
+                            phase = "الفحص الأولي: العثور على " + scanFiles + " ملفًا وحساب الحجم"
+                        ))
+                        lastScanProgressAt = now
+                    }
+                    if (now - lastScanStatusAt >= 1000L) {
+                        onStatus(
+                            "الفحص الأولي: حصر " + scanFiles + " ملفًا — " +
+                                CopyEngine.formatBytes(totalBytes)
+                        )
+                        lastScanStatusAt = now
+                    }
+                }
+            }
+        }
+
+        val rootChildren = folder.listFiles()
+        scan(folder, "", 0, rootChildren)
+        if (scanFiles == 0) throw IOException("مجلد اللعبة لا يحتوي ملفات قابلة للنسخ: " + game.sourceFolder)
+        ensureTransferActive(transferContext)
+
+        val baseRelative = game.targetPaths.single()
+        val destinationRootPath = GameCatalog.absoluteTargetPath(baseRelative)
+        if (!ShizukuServiceConnection.ensureGameDirectory(destinationRootPath)) {
+            throw IOException("تعذّر إنشاء أو فتح مجلد الوجهة عبر Shizuku: " + destinationRootPath)
+        }
+        val canonicalRoot = File(destinationRootPath).canonicalFile
+
+        fun safeDestination(relative: String): String {
+            val safeRelative = CopyEngine.safeRelativePath(relative)
+            val combined = CopyEngine.safeRelativePath(baseRelative + "/" + safeRelative)
+            val target = File(GameCatalog.absoluteTargetPath(combined)).canonicalFile
+            val rootPath = canonicalRoot.path.trimEnd(File.separatorChar)
+            val targetPath = target.path
+            val emulated = rootPath.startsWith("/storage/emulated/", ignoreCase = true)
+            val prefix = rootPath + File.separator
+            val inside = targetPath.regionMatches(0, prefix, 0, prefix.length, emulated)
+            if (!inside) {
+                throw IOException("رُفض مسار وجهة غير آمن: " + relative)
+            }
+            return target.absolutePath
+        }
+
+        // Create the original source directory structure at its final destination.
+        for (entry in manifest) {
+            ensureTransferActive(transferContext)
+            if (entry.directory) {
+                val directoryPath = safeDestination(entry.relativePath)
+                if (!ShizukuServiceConnection.ensureGameDirectory(directoryPath)) {
+                    throw IOException("تعذّر إنشاء مجلد الوجهة: " + directoryPath)
+                }
+            }
+        }
+
+        val fileEntries = manifest.filterNot { it.directory }
+        if (fileEntries.size != scanFiles) throw IOException("لم يتطابق عدد ملفات SMB بعد الفحص الأولي")
+
+        val startedAt = SystemClock.elapsedRealtime()
+        val speedMeter = TransferSpeedMeter().apply { reset(0L, startedAt) }
+        val buffer = ByteArray(BUFFER_SIZE)
+        var totalBytesDone = 0L
+        var totalFilesDone = 0
+        var lastProgressAt = startedAt
+        var lastStatusAt = startedAt
+        val phase = "نقل مباشر من SMB إلى مجلد اللعبة عبر Shizuku"
+
+        onStatus("بدأت الكتابة المباشرة إلى: " + destinationRootPath)
+        onProgress(TransferProgress(
+            totalBytes = totalBytes,
+            totalFiles = scanFiles,
+            currentFile = game.sourceFolder,
+            phase = phase
+        ))
+
+        for (entry in fileEntries) {
+            ensureTransferActive(transferContext)
+            val destinationPath = safeDestination(entry.relativePath)
+            val targetFile = File(destinationPath)
+            val parent = targetFile.parentFile ?: throw IOException("وجهة الملف غير صالحة: " + entry.relativePath)
+            val temporaryPath = File(
+                parent,
+                "." + targetFile.name + ".kafianet-" + java.util.UUID.randomUUID().toString() + ".partial"
+            ).absolutePath
+            val descriptor = ShizukuServiceConnection.openTemporaryGameFile(destinationPath, temporaryPath)
+                ?: throw IOException("تعذّر فتح ملف مؤقت بجانب الوجهة النهائية: " + entry.relativePath)
+
+            var fileBytesDone = 0L
+            var committed = false
+            try {
+                ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { output ->
+                    SmbFileInputStream(entry.source).use { input ->
+                        while (true) {
+                            ensureTransferActive(transferContext)
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            if (count == 0) continue
+                            output.write(buffer, 0, count)
+                            fileBytesDone += count.toLong()
+                            totalBytesDone += count.toLong()
+
+                            val now = SystemClock.elapsedRealtime()
+                            if (now - lastProgressAt >= 250L) {
+                                onProgress(TransferProgress(
+                                    bytesDone = totalBytesDone,
+                                    totalBytes = totalBytes,
+                                    filesDone = totalFilesDone,
+                                    totalFiles = scanFiles,
+                                    currentFile = entry.relativePath,
+                                    bytesPerSecond = speedMeter.update(totalBytesDone, now),
+                                    phase = phase
+                                ))
+                                lastProgressAt = now
+                            }
+                        }
+                    }
+                    output.flush()
+                }
+
+                if (fileBytesDone != entry.sizeBytes) {
+                    throw IOException(
+                        "تغيّر حجم المصدر أثناء النقل المباشر: " + entry.relativePath +
+                            " (المتوقع " + entry.sizeBytes + "، المقروء " + fileBytesDone + ")"
+                    )
+                }
+                ensureTransferActive(transferContext)
+                val commitResult = ShizukuServiceConnection.commitTemporaryGameFile(
+                    temporaryPath,
+                    destinationPath,
+                    entry.sizeBytes
+                )
+                if (!commitResult.startsWith("SUCCESS:")) {
+                    throw IOException("فشل اعتماد الملف في وجهته النهائية: " + entry.relativePath + " — " + commitResult)
+                }
+                if (ShizukuServiceConnection.fileLength(destinationPath) != entry.sizeBytes) {
+                    throw IOException("فشل التحقق من حجم الملف في الوجهة النهائية: " + entry.relativePath)
+                }
+                committed = true
+            } finally {
+                if (!committed) ShizukuServiceConnection.deleteTemporaryGameFile(temporaryPath)
+            }
+
+            totalFilesDone++
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastProgressAt >= 250L || totalFilesDone == scanFiles) {
+                onProgress(TransferProgress(
+                    bytesDone = totalBytesDone,
+                    totalBytes = totalBytes,
+                    filesDone = totalFilesDone,
+                    totalFiles = scanFiles,
+                    currentFile = entry.relativePath,
+                    bytesPerSecond = speedMeter.update(totalBytesDone, now),
+                    phase = phase
+                ))
+                lastProgressAt = now
+            }
+            if (now - lastStatusAt >= 1000L || totalFilesDone == scanFiles) {
+                onStatus(
+                    "نقل مباشر: " + totalFilesDone + "/" + scanFiles + " ملفًا — " +
+                        CopyEngine.formatBytes(totalBytesDone) + " / " + CopyEngine.formatBytes(totalBytes)
+                )
+                lastStatusAt = now
+            }
+        }
+
+        ensureTransferActive(transferContext)
+        if (totalFilesDone != scanFiles || totalBytesDone != totalBytes) {
+            throw IOException(
+                "لم يطابق النقل المباشر إجمالي الفحص الأولي: ملفات " +
+                    totalFilesDone + "/" + scanFiles + "، بايتات " + totalBytesDone + "/" + totalBytes
+            )
+        }
+        onProgress(TransferProgress(
+            bytesDone = totalBytes,
+            totalBytes = totalBytes,
+            filesDone = scanFiles,
+            totalFiles = scanFiles,
+            currentFile = destinationRootPath,
+            phase = "اكتمل النقل المباشر والتحقق من كل الملفات"
+        ))
+        onStatus(
+            "اكتمل النسخ المباشر والتحقق من " + scanFiles + " ملفًا إلى " +
+                destinationRootPath + " — لا يوجد مجلد تجهيز داخل بيانات التطبيق"
+        )
     }
 
     private fun shareRoot(context: jcifs.CIFSContext): SmbFile {
