@@ -2,37 +2,20 @@ package com.kafianet.control
 
 import android.content.Context
 
-import com.hierynomus.msdtyp.AccessMask
-import com.hierynomus.msfscc.FileAttributes
-import com.hierynomus.mssmb2.SMB2CreateDisposition
-import com.hierynomus.mssmb2.SMB2Dialect
-import com.hierynomus.mssmb2.SMB2CreateOptions
-import com.hierynomus.mssmb2.SMB2ShareAccess
-import com.hierynomus.smbj.SMBClient
-import com.hierynomus.smbj.SmbConfig
-import com.hierynomus.smbj.auth.AuthenticationContext
-import com.hierynomus.smbj.share.DiskShare
 import jcifs.config.PropertyConfiguration
 import jcifs.context.BaseContext
 import jcifs.smb.NtlmPasswordAuthenticator
 import jcifs.smb.SmbFile
 import jcifs.smb.SmbFileInputStream
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import android.os.SystemClock
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.util.Properties
-import java.util.EnumSet
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Reads the fixed Windows share over the local Wi-Fi/router network.
@@ -47,8 +30,7 @@ object LanLibraryTransfer {
     private const val MAX_DEPTH = 64
     private const val MAX_TOTAL_BYTES = 2L * 1024L * 1024L * 1024L * 1024L
     // Larger SMB2 READ requests reduce round-trip overhead on fast local networks.
-    private const val BUFFER_SIZE = 8 * 1024 * 1024
-    private const val SMB_COPY_WORKERS = 4
+    private const val BUFFER_SIZE = 1024 * 1024
 
     private fun ensureTransferActive(context: kotlin.coroutines.CoroutineContext) {
         context.ensureActive()
@@ -299,279 +281,101 @@ object LanLibraryTransfer {
 
             val startedAt = SystemClock.elapsedRealtime()
             val speedMeter = TransferSpeedMeter().apply { reset(0L, startedAt) }
-            val totalBytesDone = AtomicLong(0L)
-            val totalFilesDone = AtomicInteger(0)
-            val nextFileIndex = AtomicInteger(0)
+            var totalBytesDone = 0L
+            var totalFilesDone = 0
             var lastProgressAt = startedAt
             var lastStatusAt = startedAt
-            val progressLock = Any()
-            val workerCount = minOf(SMB_COPY_WORKERS, fileEntries.size)
+            val progressPhase = "المرحلة 1/$expectedPhases: Nova SMB2 Multi-Credit + Read-Ahead"
 
-            suspend fun copyUsingSmbj() = coroutineScope {
-                // Known Android throughput issue: SMBJ can stall badly with SMB3 packet signing.
-                // Try fast SMB 2.1 without SMB signing on the trusted local LAN; if server policy
-                // requires signing, the caller falls back to the compatible signed client.
-                val smbjConfig = SmbConfig.builder()
-                    .withReadBufferSize(8 * 1024 * 1024)
-                    .withMultiProtocolNegotiate(true)
-                    .withSigningEnabled(false)
-                    .withSigningRequired(false)
-                    .withDialects(SMB2Dialect.SMB_2_1, SMB2Dialect.SMB_2_0_2)
-                    .withTimeout(120, TimeUnit.SECONDS)
-                    .withSoTimeout(120, TimeUnit.SECONDS)
-                    .build()
+            onStatus("بدأ النقل عبر محرك Nova SMB2 Multi-Credit + Read-Ahead — عامل واحد وقراءة 1 MiB")
+            onProgress(TransferProgress(
+                bytesDone = 0L,
+                totalBytes = totalBytes,
+                filesDone = 0,
+                totalFiles = scanFiles,
+                currentFile = game.sourceFolder,
+                bytesPerSecond = 0L,
+                phase = progressPhase
+            ))
 
-                SMBClient(smbjConfig).use { client ->
-                    client.connect(SERVER_HOST).use { connection ->
-                        connection.authenticate(AuthenticationContext.guest()).use { session ->
-                            (session.connectShare(SHARE_NAME) as DiskShare).use { share ->
-                                repeat(workerCount) {
-                                    launch(Dispatchers.IO) {
-                                        val workerContext = currentCoroutineContext()
-                                        val buffer = ByteArray(BUFFER_SIZE)
-                                        while (true) {
-                                            ensureTransferActive(workerContext)
-                                            val index = nextFileIndex.getAndIncrement()
-                                            if (index >= fileEntries.size) break
-
-                                            val entry = fileEntries[index]
-                                            val target = safeTarget(entry.relativePath)
-                                            if (target.exists()) {
-                                                throw IOException("ملف التجهيز موجود قبل بدء كتابته: " + entry.relativePath)
-                                            }
-                                            val parent = target.parentFile
-                                                ?: throw IOException("وجهة الملف غير صالحة: " + entry.relativePath)
-                                            if (!parent.exists() && !parent.mkdirs()) {
-                                                throw IOException("تعذّر إنشاء مجلد التجهيز: " + parent.path)
-                                            }
-
-                                            var fileBytesDone = 0L
-                                            val remotePath = entry.relativePath.replace('/', '\\')
-                                            share.openFile(
-                                                remotePath,
-                                                EnumSet.of(AccessMask.FILE_READ_DATA),
-                                                EnumSet.of(FileAttributes.FILE_ATTRIBUTE_NORMAL),
-                                                EnumSet.of(
-                                                    SMB2ShareAccess.FILE_SHARE_READ,
-                                                    SMB2ShareAccess.FILE_SHARE_WRITE,
-                                                    SMB2ShareAccess.FILE_SHARE_DELETE
-                                                ),
-                                                SMB2CreateDisposition.FILE_OPEN,
-                                                EnumSet.of(SMB2CreateOptions.FILE_SEQUENTIAL_ONLY)
-                                            ).use { remoteFile ->
-                                                remoteFile.getInputStream().use { input ->
-                                                    FileOutputStream(target, false).use { output ->
-                                                        while (true) {
-                                                            ensureTransferActive(workerContext)
-                                                            val count = input.read(buffer)
-                                                            if (count < 0) break
-                                                            if (count == 0) continue
-                                                            output.write(buffer, 0, count)
-                                                            fileBytesDone += count
-                                                            totalBytesDone.addAndGet(count.toLong())
-                                                            val now = SystemClock.elapsedRealtime()
-                                                            synchronized(progressLock) {
-                                                                val currentTotal = totalBytesDone.get()
-                                                                if (now - lastProgressAt >= 250L) {
-                                                                    onProgress(TransferProgress(
-                                                                        bytesDone = currentTotal,
-                                                                        totalBytes = totalBytes,
-                                                                        filesDone = totalFilesDone.get(),
-                                                                        totalFiles = scanFiles,
-                                                                        currentFile = entry.relativePath,
-                                                                        bytesPerSecond = speedMeter.update(currentTotal, now),
-                                                                        phase = "المرحلة 1/$expectedPhases: نقل SMB عبر SMBJ المتوازي"
-                                                                    ))
-                                                                    lastProgressAt = now
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            if (fileBytesDone != entry.sizeBytes || !target.isFile || target.length() != entry.sizeBytes) {
-                                                throw IOException(
-                                                    "فشل التحقق من الملف المستلَم " + entry.relativePath +
-                                                        " (المتوقع " + entry.sizeBytes + " بايت، المستلَم " + fileBytesDone + " بايت)"
-                                                )
-                                            }
-
-                                            val completedFiles = totalFilesDone.incrementAndGet()
-                                            val now = SystemClock.elapsedRealtime()
-                                            synchronized(progressLock) {
-                                                val currentTotal = totalBytesDone.get()
-                                                if (now - lastProgressAt >= 250L || completedFiles == scanFiles) {
-                                                    onProgress(TransferProgress(
-                                                        bytesDone = currentTotal,
-                                                        totalBytes = totalBytes,
-                                                        filesDone = completedFiles,
-                                                        totalFiles = scanFiles,
-                                                        currentFile = entry.relativePath,
-                                                        bytesPerSecond = speedMeter.update(currentTotal, now),
-                                                        phase = "المرحلة 1/$expectedPhases: نقل SMB عبر SMBJ المتوازي"
-                                                    ))
-                                                    lastProgressAt = now
-                                                }
-                                                if (now - lastStatusAt >= 1000L || completedFiles == scanFiles) {
-                                                    onStatus(
-                                                        "نسخ SMB عبر SMBJ: $completedFiles/$scanFiles ملفًا — " +
-                                                            CopyEngine.formatBytes(currentTotal) + " من " + CopyEngine.formatBytes(totalBytes)
-                                                    )
-                                                    lastStatusAt = now
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            var smbjSucceeded = false
-            try {
-                onStatus("تجربة SMB2.1 السريع عبر SMBJ (بدون توقيع الحزم) — $workerCount عمال، قراءة 8 ميغابايت")
-                copyUsingSmbj()
-                smbjSucceeded = true
-            } catch (error: Exception) {
-                if (error is CancellationException) throw error
+            // The Nova client pipelines large SMB2 reads internally. One stream worker
+            // avoids competing SMB sessions while keeping the link busy through multi-credit.
+            val buffer = ByteArray(BUFFER_SIZE)
+            for (entry in fileEntries) {
                 ensureTransferActive(transferContext)
-                onStatus(
-                    "تعذّر وضع SMB2.1 السريع؛ سبب المحاولة البديلة: " +
-                        (error.message ?: error.javaClass.simpleName)
-                )
-
-                // The staging directory is unique to this transfer. Clear any partial SMBJ output
-                // before retrying so no incomplete file can be mistaken for a completed result.
-                runCatching { staging.deleteRecursively() }
-                if (!staging.mkdirs()) throw IOException("تعذّر إعادة إنشاء مجلد التجهيز بعد فشل SMBJ", error)
-                totalBytesDone.set(0L)
-                totalFilesDone.set(0)
-                nextFileIndex.set(0)
-                val resetAt = SystemClock.elapsedRealtime()
-                speedMeter.reset(0L, resetAt)
-                lastProgressAt = resetAt
-                lastStatusAt = resetAt
-
-                for (entry in manifest) {
-                    ensureTransferActive(transferContext)
-                    val target = safeTarget(entry.relativePath)
-                    if (entry.directory) {
-                        if (target.exists() && !target.isDirectory) {
-                            throw IOException("مسار مجلد موجود كملف: " + entry.relativePath)
-                        }
-                        if (!target.exists() && !target.mkdirs()) {
-                            throw IOException("تعذّر إنشاء مجلد التجهيز: " + entry.relativePath)
-                        }
-                    } else {
-                        val parent = target.parentFile ?: throw IOException("وجهة الملف غير صالحة: " + entry.relativePath)
-                        if (!parent.exists() && !parent.mkdirs()) {
-                            throw IOException("تعذّر إنشاء مجلد التجهيز: " + parent.path)
-                        }
-                    }
+                val target = safeTarget(entry.relativePath)
+                if (target.exists()) {
+                    throw IOException("ملف التجهيز موجود قبل بدء كتابته: " + entry.relativePath)
+                }
+                val parent = target.parentFile
+                    ?: throw IOException("وجهة الملف غير صالحة: " + entry.relativePath)
+                if (!parent.exists() && !parent.mkdirs()) {
+                    throw IOException("تعذّر إنشاء مجلد التجهيز: " + parent.path)
                 }
 
-                coroutineScope {
-                    repeat(workerCount) {
-                        launch(Dispatchers.IO) {
-                            val workerContext = currentCoroutineContext()
-                            val buffer = ByteArray(BUFFER_SIZE)
-                            while (true) {
-                                ensureTransferActive(workerContext)
-                                val index = nextFileIndex.getAndIncrement()
-                                if (index >= fileEntries.size) break
+                var fileBytesDone = 0L
+                SmbFileInputStream(entry.source).use { input ->
+                    FileOutputStream(target, false).use { output ->
+                        while (true) {
+                            ensureTransferActive(transferContext)
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            if (count == 0) continue
+                            output.write(buffer, 0, count)
+                            fileBytesDone += count
+                            totalBytesDone += count.toLong()
 
-                                val entry = fileEntries[index]
-                                val target = safeTarget(entry.relativePath)
-                                if (target.exists()) {
-                                    throw IOException("ملف التجهيز موجود قبل بدء كتابته: " + entry.relativePath)
-                                }
-                                val parent = target.parentFile
-                                    ?: throw IOException("وجهة الملف غير صالحة: " + entry.relativePath)
-                                if (!parent.exists() && !parent.mkdirs()) {
-                                    throw IOException("تعذّر إنشاء مجلد التجهيز: " + parent.path)
-                                }
-
-                                var fileBytesDone = 0L
-                                SmbFileInputStream(entry.source).use { input ->
-                                    FileOutputStream(target, false).use { output ->
-                                        while (true) {
-                                            ensureTransferActive(workerContext)
-                                            val count = input.read(buffer)
-                                            if (count < 0) break
-                                            if (count == 0) continue
-                                            output.write(buffer, 0, count)
-                                            fileBytesDone += count
-                                            totalBytesDone.addAndGet(count.toLong())
-                                            val now = SystemClock.elapsedRealtime()
-                                            synchronized(progressLock) {
-                                                val currentTotal = totalBytesDone.get()
-                                                if (now - lastProgressAt >= 250L) {
-                                                    onProgress(TransferProgress(
-                                                        bytesDone = currentTotal,
-                                                        totalBytes = totalBytes,
-                                                        filesDone = totalFilesDone.get(),
-                                                        totalFiles = scanFiles,
-                                                        currentFile = entry.relativePath,
-                                                        bytesPerSecond = speedMeter.update(currentTotal, now),
-                                                        phase = "المرحلة 1/$expectedPhases: نسخة SMB الاحتياطية المتوازية"
-                                                    ))
-                                                    lastProgressAt = now
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if (fileBytesDone != entry.sizeBytes || !target.isFile || target.length() != entry.sizeBytes) {
-                                    throw IOException(
-                                        "فشل التحقق من الملف المستلَم " + entry.relativePath +
-                                            " (المتوقع " + entry.sizeBytes + " بايت، المستلَم " + fileBytesDone + " بايت)"
-                                    )
-                                }
-
-                                val completedFiles = totalFilesDone.incrementAndGet()
-                                val now = SystemClock.elapsedRealtime()
-                                synchronized(progressLock) {
-                                    val currentTotal = totalBytesDone.get()
-                                    if (now - lastProgressAt >= 250L || completedFiles == scanFiles) {
-                                        onProgress(TransferProgress(
-                                            bytesDone = currentTotal,
-                                            totalBytes = totalBytes,
-                                            filesDone = completedFiles,
-                                            totalFiles = scanFiles,
-                                            currentFile = entry.relativePath,
-                                            bytesPerSecond = speedMeter.update(currentTotal, now),
-                                            phase = "المرحلة 1/$expectedPhases: نسخة SMB الاحتياطية المتوازية"
-                                        ))
-                                        lastProgressAt = now
-                                    }
-                                    if (now - lastStatusAt >= 1000L || completedFiles == scanFiles) {
-                                        onStatus(
-                                            "النسخ الاحتياطي من SMB: $completedFiles/$scanFiles ملفًا — " +
-                                                CopyEngine.formatBytes(currentTotal) + " من " + CopyEngine.formatBytes(totalBytes)
-                                        )
-                                        lastStatusAt = now
-                                    }
-                                }
+                            val now = SystemClock.elapsedRealtime()
+                            if (now - lastProgressAt >= 250L) {
+                                onProgress(TransferProgress(
+                                    bytesDone = totalBytesDone,
+                                    totalBytes = totalBytes,
+                                    filesDone = totalFilesDone,
+                                    totalFiles = scanFiles,
+                                    currentFile = entry.relativePath,
+                                    bytesPerSecond = speedMeter.update(totalBytesDone, now),
+                                    phase = progressPhase
+                                ))
+                                lastProgressAt = now
                             }
                         }
                     }
                 }
-            }
 
-            if (smbjSucceeded) {
-                onStatus("اكتمل النقل عبر SMBJ؛ جارٍ التحقق النهائي من الحجم وعدد الملفات")
-            } else {
-                onStatus("اكتمل النقل عبر مكتبة SMB الاحتياطية؛ جارٍ التحقق النهائي")
+                if (fileBytesDone != entry.sizeBytes || !target.isFile || target.length() != entry.sizeBytes) {
+                    throw IOException(
+                        "فشل التحقق من الملف المستلَم " + entry.relativePath +
+                            " (المتوقع " + entry.sizeBytes + " بايت، المستلَم " + fileBytesDone + " بايت)"
+                    )
+                }
+
+                totalFilesDone++
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastProgressAt >= 250L || totalFilesDone == scanFiles) {
+                    onProgress(TransferProgress(
+                        bytesDone = totalBytesDone,
+                        totalBytes = totalBytes,
+                        filesDone = totalFilesDone,
+                        totalFiles = scanFiles,
+                        currentFile = entry.relativePath,
+                        bytesPerSecond = speedMeter.update(totalBytesDone, now),
+                        phase = progressPhase
+                    ))
+                    lastProgressAt = now
+                }
+                if (now - lastStatusAt >= 1000L || totalFilesDone == scanFiles) {
+                    onStatus(
+                        "Nova SMB: $totalFilesDone/$scanFiles ملفًا — " +
+                            CopyEngine.formatBytes(totalBytesDone) + " / " + CopyEngine.formatBytes(totalBytes)
+                    )
+                    lastStatusAt = now
+                }
             }
 
             ensureTransferActive(transferContext)
-            val bytesDone = totalBytesDone.get()
-            val filesDone = totalFilesDone.get()
-            if (filesDone != scanFiles || bytesDone != totalBytes) {
+            val bytesDone = totalBytesDone
+            val filesDone = totalFilesDone
+            onStatus("اكتمل النقل عبر محرك Nova؛ جارٍ اعتماد إجمالي الملفات والحجم")            if (filesDone != scanFiles || bytesDone != totalBytes) {
                 throw IOException("لم يطابق النسخ المتوازي إجمالي الفحص الأولي: ملفات $filesDone/$scanFiles، بايتات $bytesDone/$totalBytes")
             }
             onProgress(TransferProgress(
@@ -600,8 +404,11 @@ object LanLibraryTransfer {
         val properties = Properties()
         properties.setProperty("jcifs.smb.client.enableSMB2", "true")
         properties.setProperty("jcifs.smb.client.disableSMB1", "true")
-        // Legacy jCIFS fallback: keep the requested read buffer large in case SMBJ is unavailable.
+        // Match Nova's SMB2 multi-credit window for predictable high-throughput reads.
         properties.setProperty("jcifs.smb.client.rcv_buf_size", BUFFER_SIZE.toString())
+        properties.setProperty("jcifs.smb.client.transaction_buf_size", BUFFER_SIZE.toString())
+        properties.setProperty("jcifs.smb.client.snd_buf_size", BUFFER_SIZE.toString())
+        properties.setProperty("jcifs.smb.client.tcpNoDelay", "true")
         properties.setProperty("jcifs.smb.client.connTimeout", "10000")
         properties.setProperty("jcifs.smb.client.responseTimeout", responseTimeoutMs.toString())
         properties.setProperty("jcifs.smb.client.soTimeout", responseTimeoutMs.toString())
