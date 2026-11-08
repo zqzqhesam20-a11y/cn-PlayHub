@@ -254,6 +254,12 @@ object LanLibraryTransfer {
             fun safeTarget(relative: String): File {
                 val target = File(staging, relative).canonicalFile
                 if (target != canonicalRoot && !target.path.startsWith(canonicalRoot.path + File.separator)) {
+                    android.util.Log.e(
+                        "CN_PLAYHUB_TRANSFER",
+                        "Unsafe staging target rejected: relative=[${relative}], " +
+                            "staging=[${staging.absolutePath}], root=[${canonicalRoot.path}], " +
+                            "target=[${target.path}]"
+                    )
                     throw IOException("رُفض مسار غير آمن: " + relative)
                 }
                 return target
