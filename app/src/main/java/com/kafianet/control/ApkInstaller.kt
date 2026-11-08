@@ -25,6 +25,44 @@ data class ApkInstallChoice(
 )
 
 object ApkInstaller {
+    const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
+
+    fun isShizukuInstalled(context: Context): Boolean = try {
+        if (Build.VERSION.SDK_INT >= 33) {
+            context.packageManager.getPackageInfo(
+                SHIZUKU_PACKAGE,
+                android.content.pm.PackageManager.PackageInfoFlags.of(0)
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(SHIZUKU_PACKAGE, 0)
+        }
+        true
+    } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
+        false
+    }
+
+    fun launchShizuku(context: Context): Boolean {
+        val intent = context.packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE) ?: return false
+        context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        return true
+    }
+
+    fun isShizukuApk(context: Context, apkFile: File): Boolean {
+        val info = try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.packageManager.getPackageArchiveInfo(
+                    apkFile.absolutePath,
+                    android.content.pm.PackageManager.PackageInfoFlags.of(0)
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.getPackageArchiveInfo(apkFile.absolutePath, 0)
+            }
+        } catch (_: Exception) { null }
+        return info?.packageName == SHIZUKU_PACKAGE
+    }
+
     private const val MAX_APK_BYTES = 10L * 1024L * 1024L * 1024L
     private const val BUFFER_SIZE = 256 * 1024
 
