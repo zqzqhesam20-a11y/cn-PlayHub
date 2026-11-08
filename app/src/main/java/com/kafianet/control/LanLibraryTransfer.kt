@@ -375,7 +375,8 @@ object LanLibraryTransfer {
             ensureTransferActive(transferContext)
             val bytesDone = totalBytesDone
             val filesDone = totalFilesDone
-            onStatus("اكتمل النقل عبر محرك Nova؛ جارٍ اعتماد إجمالي الملفات والحجم")            if (filesDone != scanFiles || bytesDone != totalBytes) {
+            onStatus("اكتمل النقل عبر محرك Nova؛ جارٍ اعتماد إجمالي الملفات والحجم")
+            if (filesDone != scanFiles || bytesDone != totalBytes) {
                 throw IOException("لم يطابق النسخ المتوازي إجمالي الفحص الأولي: ملفات $filesDone/$scanFiles، بايتات $bytesDone/$totalBytes")
             }
             onProgress(TransferProgress(
