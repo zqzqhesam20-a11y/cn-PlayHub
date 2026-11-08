@@ -47,6 +47,151 @@ class ShizukuFileService : IShizukuFileService.Stub() {
         return candidate.path.substring(prefix.length).replace(File.separatorChar, '/')
     }
 
+
+    /** Destination access is restricted to the fixed game roots registered in GameCatalog. */
+    private fun isAllowedGameDestination(file: File): Boolean {
+        val candidate = file.canonicalFile
+        return GameCatalog.games.any { game ->
+            game.targetPaths.any { relativeRoot ->
+                val allowedRoot = File(GameCatalog.absoluteTargetPath(relativeRoot)).canonicalFile
+                isInsideCanonicalRoot(allowedRoot, candidate)
+            }
+        }
+    }
+
+    private fun isValidTemporarySibling(temporary: File, destination: File): Boolean {
+        val temporaryParent = temporary.parentFile ?: return false
+        val destinationParent = destination.parentFile ?: return false
+        return sameCanonicalPath(temporaryParent.canonicalFile.path, destinationParent.canonicalFile.path) &&
+            temporary.name.startsWith("." + destination.name + ".kafianet-") &&
+            temporary.name.endsWith(".partial")
+    }
+
+    override fun ensureGameDirectory(path: String): Boolean = try {
+        val directory = File(path).canonicalFile
+        if (!isAllowedGameDestination(directory)) {
+            throw IOException("رُفض مجلد خارج وجهات الألعاب المسجلة: " + directory.path)
+        }
+        if (directory.exists()) {
+            directory.isDirectory
+        } else {
+            directory.mkdirs() && directory.isDirectory
+        }
+    } catch (error: Exception) {
+        android.util.Log.e("CN_PLAYHUB_TRANSFER", "ensureGameDirectory failed: " + path, error)
+        false
+    }
+
+    override fun openTemporaryGameFile(
+        destinationPath: String,
+        temporaryPath: String
+    ): ParcelFileDescriptor? = try {
+        val destination = File(destinationPath).canonicalFile
+        val temporary = File(temporaryPath).canonicalFile
+        if (!isAllowedGameDestination(destination) || !isAllowedGameDestination(temporary)) {
+            throw IOException("مسار الملف المؤقت أو وجهته خارج مجلدات الألعاب المسموحة")
+        }
+        if (!isValidTemporarySibling(temporary, destination)) {
+            throw IOException("الملف المؤقت يجب أن يكون بجانب الملف النهائي وباسم مؤقت معتمد")
+        }
+        if (destination.exists() && destination.isDirectory) {
+            throw IOException("وجهة الملف موجودة كمجلد: " + destination.path)
+        }
+        val parent = destination.parentFile ?: throw IOException("وجهة الملف بلا مجلد أب")
+        if (!parent.exists() && !parent.mkdirs()) {
+            throw IOException("تعذّر إنشاء مجلد الوجهة: " + parent.path)
+        }
+        if (!parent.isDirectory || !isAllowedGameDestination(destination.canonicalFile)) {
+            throw IOException("مجلد الوجهة النهائي غير صالح أو خارج النطاق المسموح")
+        }
+        if (!temporary.createNewFile()) {
+            throw IOException("اسم الملف المؤقت مستخدم مسبقًا: " + temporary.name)
+        }
+        try {
+            ParcelFileDescriptor.open(
+                temporary,
+                ParcelFileDescriptor.MODE_WRITE_ONLY or ParcelFileDescriptor.MODE_TRUNCATE
+            )
+        } catch (error: Exception) {
+            runCatching { temporary.delete() }
+            throw error
+        }
+    } catch (error: Exception) {
+        android.util.Log.e(
+            "CN_PLAYHUB_TRANSFER",
+            "openTemporaryGameFile rejected: destination=[" + destinationPath +
+                "], temporary=[" + temporaryPath + "]",
+            error
+        )
+        null
+    }
+
+    override fun commitTemporaryGameFile(
+        temporaryPath: String,
+        destinationPath: String,
+        expectedBytes: Long
+    ): String = try {
+        if (expectedBytes < 0L) throw IOException("حجم الملف المتوقع غير صالح")
+        val destination = File(destinationPath).canonicalFile
+        val temporary = File(temporaryPath).canonicalFile
+        if (!isAllowedGameDestination(destination) || !isAllowedGameDestination(temporary)) {
+            throw IOException("مسار الاعتماد خارج وجهات الألعاب المسموحة")
+        }
+        if (!isValidTemporarySibling(temporary, destination)) {
+            throw IOException("الملف المؤقت ليس بجانب وجهته النهائية")
+        }
+        if (!temporary.isFile || temporary.length() != expectedBytes) {
+            throw IOException(
+                "حجم الملف المؤقت غير مطابق: المتوقع " + expectedBytes +
+                    "، الموجود " + (if (temporary.exists()) temporary.length() else -1L)
+            )
+        }
+        if (destination.exists() && destination.isDirectory) {
+            throw IOException("الوجهة النهائية مجلد وليست ملفًا: " + destination.path)
+        }
+        try {
+            Files.move(
+                temporary.toPath(),
+                destination.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+            )
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(
+                temporary.toPath(),
+                destination.toPath(),
+                StandardCopyOption.REPLACE_EXISTING
+            )
+        }
+        if (!destination.isFile || destination.length() != expectedBytes) {
+            throw IOException("فشل التحقق من الملف بعد اعتماده في الوجهة النهائية")
+        }
+        "SUCCESS:" + destination.length()
+    } catch (error: Exception) {
+        android.util.Log.e(
+            "CN_PLAYHUB_TRANSFER",
+            "commitTemporaryGameFile failed: temporary=[" + temporaryPath +
+                "], destination=[" + destinationPath + "]",
+            error
+        )
+        "ERROR:" + error.javaClass.simpleName + ":" + (error.message ?: "خطأ غير محدد")
+    }
+
+    override fun deleteTemporaryGameFile(path: String): Boolean = try {
+        val temporary = File(path).canonicalFile
+        val allowed = isAllowedGameDestination(temporary)
+        val managedName = temporary.name.startsWith(".") &&
+            temporary.name.contains(".kafianet-") &&
+            temporary.name.endsWith(".partial")
+        if (!allowed || !managedName) {
+            throw IOException("رُفض حذف ملف غير مؤقت أو خارج وجهات الألعاب")
+        }
+        !temporary.exists() || temporary.delete()
+    } catch (error: Exception) {
+        android.util.Log.e("CN_PLAYHUB_TRANSFER", "deleteTemporaryGameFile failed: " + path, error)
+        false
+    }
+
     private data class CopyEntry(val file: File, val relativePath: String, val directory: Boolean, val sizeBytes: Long = 0L)
     private val copyCancelled = AtomicBoolean(false)
 
