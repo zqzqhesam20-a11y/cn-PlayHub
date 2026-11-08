@@ -44,9 +44,9 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
-    implementation("com.hierynomus:smbj:0.14.0")
     implementation("org.nanohttpd:nanohttpd:2.3.1")
-    implementation("eu.agno3.jcifs:jcifs-ng:2.1.10")
+    // Same tested Nova SMB2 multi-credit + read-ahead engine used by Al-Istiraha.
+    implementation("com.github.nova-video-player:jcifs-ng:v2.1.11-nova5")
 
     implementation(platform("androidx.compose:compose-bom:2025.01.00"))
     implementation("androidx.compose.ui:ui")
