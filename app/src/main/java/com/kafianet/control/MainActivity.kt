@@ -401,18 +401,77 @@ private fun TransferDashboard(shizukuRevision: Int) {
 
     fun requestShizukuAccess() {
         when {
-            !ShizukuHelper.isAvailable() ->
-                updateStatus("افتح تطبيق Shizuku وابدأ الخدمة أولًا؛ ستتغير الحالة تلقائيًا عند اتصاله")
-            !ShizukuHelper.hasPermission() -> {
+            ShizukuHelper.isAvailable() && !ShizukuHelper.hasPermission() -> {
                 val request = runCatching { Shizuku.requestPermission(MainActivity.SHIZUKU_PERMISSION_CODE) }
                 updateStatus(
-                    if (request.isSuccess) "تم طلب إذن Shizuku؛ امنح الإذن في نافذته وستتحدّث الحالة تلقائيًا"
-                    else "تعذّر طلب إذن Shizuku: " + (request.exceptionOrNull()?.message ?: "تحقق من اتصال الخدمة")
+                    if (request.isSuccess) "تم طلب إذن Shizuku؛ وافق في نافذته"
+                    else "تعذّر طلب إذن Shizuku: " + (request.exceptionOrNull()?.message ?: "تحقق من الخدمة")
+                )
+            }
+            ShizukuHelper.isAvailable() -> {
+                ShizukuServiceConnection.retryBinding()
+                updateStatus("Shizuku متصل والإذن موجود؛ جارٍ ربط خدمة الملفات")
+            }
+            ApkInstaller.isShizukuInstalled(context) -> {
+                val opened = runCatching { ApkInstaller.launchShizuku(context) }.getOrDefault(false)
+                updateStatus(
+                    if (opened) "تم فتح Shizuku؛ ابدأ الخدمة من داخله ثم ارجع إلى cn-PlayHub"
+                    else "Shizuku مثبت لكن تعذّر فتحه؛ افتحه يدويًا وابدأ الخدمة"
                 )
             }
             else -> {
-                ShizukuServiceConnection.retryBinding()
-                updateStatus("إذن Shizuku ممنوح؛ جارٍ إعادة ربط خدمة الملفات واختبارها فعليًا")
+                val rootUri = usbUri
+                if (rootUri == null) {
+                    updateStatus("Shizuku غير مثبت — اختر جذر الفلاشة أولًا ليتم العثور على Shizuku.apk")
+                } else {
+                    updateStatus("البحث في جذر الفلاشة عن Shizuku.apk والتحقق من هوية الحزمة")
+                    scope.launch {
+                        var verifiedApk: File? = null
+                        try {
+                            val root = withContext(Dispatchers.IO) {
+                                DocumentFile.fromTreeUri(context, rootUri)
+                                    ?: throw IOException("تعذّر فتح جذر الفلاشة")
+                            }
+                            val candidates = withContext(Dispatchers.IO) {
+                                root.listFiles().filter {
+                                    it.isFile &&
+                                        (it.name ?: "").endsWith(".apk", ignoreCase = true) &&
+                                        (it.name ?: "").contains("shizuku", ignoreCase = true)
+                                }
+                            }
+                            if (candidates.isEmpty()) {
+                                updateStatus("لم يوجد Shizuku*.apk مباشرة في جذر الفلاشة")
+                                return@launch
+                            }
+                            for (candidate in candidates) {
+                                val name = candidate.name ?: "Shizuku.apk"
+                                val cached = ApkInstaller.copyStreamToCache(
+                                    context,
+                                    name,
+                                    candidate.length(),
+                                    {
+                                        context.contentResolver.openInputStream(candidate.uri)
+                                            ?: throw IOException("تعذّر قراءة $name من الفلاشة")
+                                    }
+                                )
+                                if (ApkInstaller.isShizukuApk(context, cached)) {
+                                    verifiedApk = cached
+                                    break
+                                }
+                                cached.delete()
+                            }
+                            val apk = verifiedApk
+                            if (apk == null) {
+                                updateStatus("لم يعثر الفحص على APK يحمل هوية Shizuku الرسمية؛ لم يتم فتح المثبّت")
+                            } else {
+                                updateStatus("تم التحقق من حزمة Shizuku الرسمية؛ جارٍ فتح مثبّت Android")
+                                ApkInstaller.launchInstaller(context, apk)
+                            }
+                        } catch (error: Exception) {
+                            updateStatus("تعذّر تجهيز تثبيت Shizuku: " + (error.message ?: error.javaClass.simpleName))
+                        }
+                    }
+                }
             }
         }
         activity?.refreshShizukuMonitor()
