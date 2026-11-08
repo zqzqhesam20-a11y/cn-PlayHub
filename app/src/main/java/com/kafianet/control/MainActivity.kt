@@ -637,6 +637,11 @@ private fun TransferDashboard(shizukuRevision: Int) {
                 status = "أُوقف النسخ من السيرفر"
                 throw cancelled
             } catch (error: Exception) {
+                android.util.Log.e(
+                    "CN_PLAYHUB_TRANSFER",
+                    "LAN transfer failed for game=[${game.sourceFolder}], message=[${error.message}]",
+                    error
+                )
                 status = if (TransferForegroundService.isCancellationRequested()) "أُوقف النسخ من السيرفر" else
                     "فشل نسخ " + game.arabic + " من السيرفر: " +
                     (error.message ?: "تحقق من المشاركة وShizuku والمساحة")
