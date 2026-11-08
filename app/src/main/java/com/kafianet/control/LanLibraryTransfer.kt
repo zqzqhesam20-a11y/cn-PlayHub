@@ -670,17 +670,22 @@ object LanLibraryTransfer {
                     totalFilesDone + "/" + scanFiles + "، بايتات " + totalBytesDone + "/" + totalBytes
             )
         }
+        val completedDestinationPath = if (game.sourceFolder == "ببجي (PUBG)") {
+            GameCatalog.absoluteTargetPath(baseRelative + "/Saved")
+        } else {
+            destinationRootPath
+        }
         onProgress(TransferProgress(
             bytesDone = totalBytes,
             totalBytes = totalBytes,
             filesDone = scanFiles,
             totalFiles = scanFiles,
-            currentFile = destinationRootPath,
+            currentFile = completedDestinationPath,
             phase = "اكتمل النقل المباشر والتحقق من كل الملفات"
         ))
         onStatus(
             "اكتمل النسخ المباشر والتحقق من " + scanFiles + " ملفًا إلى " +
-                destinationRootPath + " — لا يوجد مجلد تجهيز داخل بيانات التطبيق"
+                completedDestinationPath + " — لا يوجد مجلد تجهيز داخل بيانات التطبيق"
         )
     }
 
