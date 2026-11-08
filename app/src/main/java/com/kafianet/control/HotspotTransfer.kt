@@ -282,7 +282,9 @@ object HotspotTransfer {
                     val targetRelative = if (game.targetPaths.size > 1) stageRelativeForMultipleTargets(item.path) else item.path
                     val target = File(stagingGame, targetRelative).canonicalFile
                     val canonicalRoot = stagingGame.canonicalFile
-                    if (target != canonicalRoot && !target.path.startsWith(canonicalRoot.path + File.separator)) {
+                    if (sameCanonicalPath(canonicalRoot.path, target.path) ||
+                        !isInsideCanonicalRoot(canonicalRoot, target)
+                    ) {
                         throw IOException("مسار ملف غير آمن: ${item.path}")
                     }
                     val parent = target.parentFile ?: throw IOException("وجهة الملف غير صالحة: ${item.path}")
@@ -355,6 +357,40 @@ object HotspotTransfer {
         val bytes: Long,
         val files: Int
     )
+
+    // Android emulated storage may vary only the casing of "Android" in canonical paths.
+    // Keep strict, case-sensitive checks for every other filesystem path.
+    private fun isEmulatedStoragePath(path: String): Boolean =
+        path.startsWith("/storage/emulated/", ignoreCase = true)
+
+    private fun sameCanonicalPath(first: String, second: String): Boolean =
+        if (isEmulatedStoragePath(first) && isEmulatedStoragePath(second)) {
+            first.equals(second, ignoreCase = true)
+        } else {
+            first == second
+        }
+
+    private fun isInsideCanonicalRoot(root: File, candidate: File): Boolean {
+        val rootPath = root.path.trimEnd(File.separatorChar)
+        val candidatePath = candidate.path
+        if (sameCanonicalPath(rootPath, candidatePath)) return true
+        val prefix = rootPath + File.separator
+        return candidatePath.regionMatches(
+            0, prefix, 0, prefix.length, isEmulatedStoragePath(rootPath)
+        )
+    }
+
+    private fun relativeToCanonicalRoot(root: File, candidate: File): String {
+        if (sameCanonicalPath(root.path, candidate.path)) return ""
+        val prefix = root.path.trimEnd(File.separatorChar) + File.separator
+        if (!candidate.path.regionMatches(
+                0, prefix, 0, prefix.length, isEmulatedStoragePath(root.path)
+            )
+        ) {
+            throw IOException("العنصر خارج مجلد التجهيز المعتمد: $candidate")
+        }
+        return candidate.path.substring(prefix.length).replace(File.separatorChar, '/')
+    }
 
     /** Copies to the fixed game path and only reports success after destination verification. */
     suspend fun copyStagedGameToTargets(
@@ -480,7 +516,10 @@ object HotspotTransfer {
                     val routeRoot = if (obb) routeObb else routeData
                     val stripped = stripDestinationPrefix(originalRelative, obb)
                     val output = File(routeRoot, stripped).canonicalFile
-                    if (!output.path.startsWith(routeRoot.canonicalPath + File.separator)) {
+                    val canonicalRouteRoot = routeRoot.canonicalFile
+                    if (sameCanonicalPath(canonicalRouteRoot.path, output.path) ||
+                        !isInsideCanonicalRoot(canonicalRouteRoot, output)
+                    ) {
                         throw IOException("رُفض مسار توجيه غير آمن: " + originalRelative)
                     }
                     val outputParent = output.parentFile ?: throw IOException("مسار توجيه غير صالح: " + output)
@@ -646,20 +685,19 @@ object HotspotTransfer {
 
     private fun collectStagedFiles(root: File, ensureActive: () -> Unit = {}): List<StagedFile> {
         val canonicalRoot = root.canonicalFile
-        val rootPrefix = canonicalRoot.path.trimEnd(File.separatorChar) + File.separator
         val result = ArrayList<StagedFile>()
         fun walk(node: File, depth: Int) {
             ensureActive()
             if (depth > MAX_DEPTH) throw IOException("تداخل المجلدات في التجهيز تجاوز الحد")
             val canonical = node.canonicalFile
-            if (canonical.path != canonicalRoot.path && !canonical.path.startsWith(rootPrefix)) {
+            if (!isInsideCanonicalRoot(canonicalRoot, canonical)) {
                 throw IOException("رُفض عنصر خارج مجلد التجهيز: " + node)
             }
             if (canonical.isDirectory) {
                 val children = canonical.listFiles() ?: throw IOException("تعذّرت قراءة مجلد التجهيز: " + canonical)
                 children.sortedBy { it.name.lowercase() }.forEach { walk(it, depth + 1) }
             } else if (canonical.isFile) {
-                val relative = canonical.path.removePrefix(rootPrefix).replace(File.separatorChar, '/')
+                val relative = relativeToCanonicalRoot(canonicalRoot, canonical)
                 val size = canonical.length()
                 if (relative.isBlank() || size < 0L) throw IOException("ملف تجهيز غير صالح: " + canonical)
                 result.add(StagedFile(canonical, CopyEngine.safeRelativePath(relative), size))
