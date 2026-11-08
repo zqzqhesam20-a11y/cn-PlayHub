@@ -82,7 +82,7 @@ private data class TransferDocumentEntry(
 )
 
 object CopyEngine {
-    private const val BUFFER_SIZE = 1024 * 1024
+    private const val BUFFER_SIZE = 8 * 1024 * 1024
     private const val MAX_FILES = 50_000
     private const val MAX_DEPTH = 64
     private const val MAX_TOTAL_BYTES = 2L * 1024L * 1024L * 1024L * 1024L
