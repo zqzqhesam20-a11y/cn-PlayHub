@@ -627,7 +627,12 @@ private fun TransferDashboard(shizukuRevision: Int) {
                     LanLibraryTransfer.copyGameDirectToTargets(
                         game, ::updateProgress, ::updateStatus
                     )
-                    status = "اكتمل نسخ " + game.arabic + " مباشرة إلى " + game.destinationLabel
+                    val completedPath = if (game.sourceFolder == "ببجي (PUBG)") {
+                        GameCatalog.absoluteTargetPath(game.targetPaths.single() + "/Saved")
+                    } else {
+                        GameCatalog.absoluteTargetPath(game.targetPaths.single())
+                    }
+                    status = "اكتمل نسخ " + game.arabic + " مباشرة إلى " + completedPath
                 } else {
                     // Multi-destination games (for example data + OBB) retain their
                     // routing stage; single-destination games never use app storage staging.
