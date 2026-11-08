@@ -12,7 +12,7 @@ import rikka.shizuku.Shizuku
 object ShizukuServiceConnection {
     private const val BIND_RETRY_WINDOW_MS = 10_000L
     private const val SERVICE_VERIFY_TIMEOUT_MS = 5_000L
-    private const val USER_SERVICE_VERSION = 7
+    private const val USER_SERVICE_VERSION = 8
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -332,6 +332,40 @@ object ShizukuServiceConnection {
     fun openFileForRead(path: String): ParcelFileDescriptor? = try {
         service?.openFileForRead(path)
     } catch (_: Exception) { null }
+
+
+    /** Creates a directory only inside one of the fixed game destination roots. */
+    fun ensureGameDirectory(path: String): Boolean = try {
+        if (!isReady()) false else service?.ensureGameDirectory(path) ?: false
+    } catch (_: Exception) {
+        false
+    }
+
+    /** Opens a same-directory temporary file through the Shizuku identity. */
+    fun openTemporaryGameFile(destinationPath: String, temporaryPath: String): ParcelFileDescriptor? = try {
+        if (!isReady()) null else service?.openTemporaryGameFile(destinationPath, temporaryPath)
+    } catch (error: Exception) {
+        bindFailure = "تعذّر فتح ملف الوجهة المباشر: " + (error.message ?: error.javaClass.simpleName)
+        notifyStateChanged()
+        null
+    }
+
+    /** Atomically replaces the final file only after its temporary payload has the expected size. */
+    fun commitTemporaryGameFile(temporaryPath: String, destinationPath: String, expectedBytes: Long): String {
+        val current = service ?: return "ERROR:" + (bindFailure ?: "خدمة Shizuku غير مربوطة")
+        if (!isReady()) return "ERROR:" + (bindFailure ?: "خدمة Shizuku غير جاهزة")
+        return try {
+            current.commitTemporaryGameFile(temporaryPath, destinationPath, expectedBytes).orEmpty()
+        } catch (error: Exception) {
+            "ERROR:" + (error.message ?: error.javaClass.simpleName)
+        }
+    }
+
+    fun deleteTemporaryGameFile(path: String): Boolean = try {
+        service?.deleteTemporaryGameFile(path) ?: false
+    } catch (_: Exception) {
+        false
+    }
 
     /** Clears a previous cancellation before starting the next destination copy. */
     fun prepareCopy(): Boolean {
