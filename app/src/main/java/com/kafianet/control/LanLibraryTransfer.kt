@@ -253,7 +253,19 @@ object LanLibraryTransfer {
 
             fun safeTarget(relative: String): File {
                 val target = File(staging, relative).canonicalFile
-                if (target != canonicalRoot && !target.path.startsWith(canonicalRoot.path + File.separator)) {
+                val rootPath = canonicalRoot.path.trimEnd(File.separatorChar)
+                val targetPath = target.path
+                // Android emulated storage may canonicalize the same "Android" directory
+                // with different casing for child paths. Apply case-insensitive comparison
+                // only on that storage mount; retain strict comparison everywhere else.
+                val isEmulatedStorage = rootPath.startsWith("/storage/emulated/", ignoreCase = true)
+                val isInsideRoot = if (isEmulatedStorage) {
+                    targetPath.equals(rootPath, ignoreCase = true) ||
+                        targetPath.startsWith(rootPath + File.separator, ignoreCase = true)
+                } else {
+                    targetPath == rootPath || targetPath.startsWith(rootPath + File.separator)
+                }
+                if (!isInsideRoot) {
                     android.util.Log.e(
                         "CN_PLAYHUB_TRANSFER",
                         "Unsafe staging target rejected: relative=[${relative}], " +
