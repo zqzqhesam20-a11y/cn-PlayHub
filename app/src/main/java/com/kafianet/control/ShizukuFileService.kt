@@ -328,6 +328,6 @@ class ShizukuFileService : IShizukuFileService.Stub() {
         const val MAX_FILES = 50_000
         const val MAX_DEPTH = 64
         const val MAX_TOTAL_BYTES = 2L * 1024L * 1024L * 1024L * 1024L
-        const val BUFFER_SIZE = 1024 * 1024
+        const val BUFFER_SIZE = 8 * 1024 * 1024
     }
 }
