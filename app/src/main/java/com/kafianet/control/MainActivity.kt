@@ -55,14 +55,14 @@ private const val APP_PASSWORD = "dontplaywithreal"
 private const val PREFS_NAME = "kafianet_control_prefs"
 private const val PREF_USB_URI = "usb_tree_uri"
 
-private val Forest = Color(0xFF09110D)
-private val Panel = Color(0xFF121F18)
-private val CardGreen = Color(0xFF17271E)
-private val Neon = Color(0xFFA5F36B)
-private val Mint = Color(0xFF48D6A0)
-private val Muted = Color(0xFF9BAFA2)
-private val Amber = Color(0xFFFFC56E)
-private val Danger = Color(0xFFFF7777)
+private val Forest = Color(0xFF0A0E1A)
+private val Panel = Color(0xFF0F1525)
+private val CardGreen = Color(0xFF141B2E)
+private val Neon = Color(0xFF22D3EE)
+private val Mint = Color(0xFF34D399)
+private val Muted = Color(0xFF94A3B8)
+private val Amber = Color(0xFFFBBF24)
+private val Danger = Color(0xFFF87171)
 
 class MainActivity : ComponentActivity() {
     companion object { const val SHIZUKU_PERMISSION_CODE = 100 }
@@ -165,7 +165,7 @@ private fun PasswordGate(onUnlock: () -> Unit) {
     var error by remember { mutableStateOf(false) }
     Box(
         Modifier.fillMaxSize()
-            .background(Brush.verticalGradient(listOf(Color(0xFF07100B), Color(0xFF1B3020), Color(0xFF080D0A))))
+            .background(Brush.verticalGradient(listOf(Color(0xFF070B14), Color(0xFF16243B), Color(0xFF0A0E1A))))
             .padding(24.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -219,6 +219,8 @@ private fun TransferDashboard(shizukuRevision: Int) {
     }
 
     var tab by rememberSaveable { mutableStateOf("USB") }
+    var selectedSection by rememberSaveable { mutableStateOf("الألعاب") }
+    var installSource by rememberSaveable { mutableStateOf("USB") }
     var phoneRole by rememberSaveable { mutableStateOf("receiver") }
     var status by remember { mutableStateOf("جاهز — اختر طريقة النسخ أو النقل") }
     var transferBusy by remember { mutableStateOf(false) }
@@ -809,17 +811,37 @@ private fun TransferDashboard(shizukuRevision: Int) {
 
     Column(Modifier.fillMaxSize().background(Forest)) {
         AppHeader(shizukuRevision, onRequestShizuku = { requestShizukuAccess() })
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf("USB", "الوايرلس", "الهاتف").forEach { item ->
-                val selected = tab == item
-                Surface(Modifier.weight(1f).clickable { tab = item }, shape = RoundedCornerShape(13.dp), color = if (selected) Neon else Panel) {
-                    Text(item, Modifier.padding(vertical = 11.dp, horizontal = 3.dp),
-                        textAlign = TextAlign.Center, color = if (selected) Color(0xFF13200F) else Muted,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, fontSize = 10.sp)
-                }
-            }
-        }
         Box(Modifier.weight(1f).fillMaxWidth()) {
+            when (selectedSection) {
+                "الألعاب" -> PlayHubGamesHome(
+                    games = gameItems,
+                    usbSelected = usbUri != null,
+                    onTransfer = { game ->
+                        selectedSection = "النقل"
+                        when (tab) {
+                            "USB" -> copyUsbGame(game)
+                            "الوايرلس" -> {
+                                val remote = pcGames.firstOrNull { it.name == game.sourceFolder }
+                                if (remote != null) copyPcGame(remote)
+                                else status = "اكتشف ألعاب السيرفر أولًا من تبويب النقل ثم أعد المحاولة"
+                            }
+                            "الهاتف" -> {
+                                val remote = remoteGames.firstOrNull { it.name == game.sourceFolder }
+                                if (remote != null) {
+                                    pendingGame = remote
+                                    requireNetworkPermission("download")
+                                } else status = "اكتشف مكتبة الهاتف المصدر أولًا من تبويب النقل"
+                            }
+                        }
+                    },
+                    onInstall = { game ->
+                        selectedSection = "التثبيت"
+                        installSource = tab
+                    }
+                )
+                "النقل" -> Column(Modifier.fillMaxSize()) {
+                    PlayHubSourceSelector(tab) { tab = it }
+                            Box(Modifier.weight(1f).fillMaxWidth()) {
             when (tab) {
                 "USB" -> UsbPage(
                     usbUri != null, transferBusy, status, progress,
@@ -891,7 +913,38 @@ private fun TransferDashboard(shizukuRevision: Int) {
                 )
             }
         }
-        StatusBar(status, transferBusy || hosting)
+                    StatusBar(status, transferBusy || hosting)
+                }
+                "التثبيت" -> PlayHubInstallPage(
+                    games = gameItems,
+                    source = installSource,
+                    onSourceChange = { installSource = it },
+                    busy = transferBusy,
+                    status = status,
+                    onInstall = { game ->
+                        when (installSource) {
+                            "USB" -> requestUsbInstall(game)
+                            "الوايرلس" -> requestServerInstall(game)
+                            "الهاتف" -> requestPhoneInstall(game)
+                        }
+                    }
+                )
+                "السجل" -> PlayHubHistoryPage(transferBusy || hosting, status, progress)
+                "التخزين" -> PlayHubStoragePage(context, usbUri)
+                "Shizuku" -> PlayHubShizukuPage(
+                    available = ShizukuHelper.isAvailable(),
+                    permission = ShizukuHelper.hasPermission(),
+                    ready = ShizukuServiceConnection.isReady(),
+                    binding = ShizukuServiceConnection.isBinding(),
+                    failure = ShizukuServiceConnection.bindFailureReason(),
+                    onRequest = { requestShizukuAccess() }
+                )
+                "الإعدادات" -> PlayHubSettingsPage(usbUri, status) {
+                    usbPicker.launch(null)
+                }
+            }
+        }
+        PlayHubBottomNavigation(selectedSection) { selectedSection = it }
     }
 
     if (installChoices.isNotEmpty()) {
@@ -935,55 +988,67 @@ private fun TransferDashboard(shizukuRevision: Int) {
 
 @Composable
 private fun AppHeader(shizukuRevision: Int, onRequestShizuku: () -> Unit) {
-    // Re-read service state on every monitor revision; do not let Compose keep stale header text.
     val available = remember(shizukuRevision) { ShizukuHelper.isAvailable() }
     val permission = remember(shizukuRevision) { ShizukuHelper.hasPermission() }
-    val fileServiceReady = remember(shizukuRevision) { ShizukuServiceConnection.isReady() }
-    val fileServiceBinding = remember(shizukuRevision) { ShizukuServiceConnection.isBinding() }
-    val fileServiceFailure = remember(shizukuRevision) { ShizukuServiceConnection.bindFailureReason() }
-    Column(Modifier.fillMaxWidth().background(Brush.horizontalGradient(listOf(Color(0xFF1B3524), Color(0xFF102017), Color(0xFF0A110E)))).padding(horizontal = 20.dp, vertical = 18.dp)) {
+    val ready = remember(shizukuRevision) { ShizukuServiceConnection.isReady() }
+    val binding = remember(shizukuRevision) { ShizukuServiceConnection.isBinding() }
+    val failure = remember(shizukuRevision) { ShizukuServiceConnection.bindFailureReason() }
+    Column(
+        Modifier.fillMaxWidth()
+            .background(Brush.horizontalGradient(listOf(Color(0xFF16243B), Color(0xFF0F1525), Color(0xFF0A0E1A))))
+            .padding(horizontal = 16.dp, vertical = 13.dp)
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(52.dp).background(Brush.linearGradient(listOf(Neon, Mint)), RoundedCornerShape(18.dp)), contentAlignment = Alignment.Center) {
-                Text("KN", color = Color(0xFF102015), fontWeight = FontWeight.Black, fontSize = 17.sp)
-            }
-            Spacer(Modifier.width(13.dp))
-            Column(Modifier.weight(1f)) {
-                Text("cn-PlayHub", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Black)
-                Text("هشام الريمي  •  مركز نقل الألعاب", color = Neon, fontSize = 11.sp)
-            }
-            Column(
-                modifier = Modifier.clickable(onClick = onRequestShizuku).padding(start = 6.dp),
-                horizontalAlignment = Alignment.End
+            Box(
+                Modifier.size(45.dp).background(
+                    Brush.linearGradient(listOf(Color(0xFF22D3EE), Color(0xFF3B82F6))),
+                    RoundedCornerShape(15.dp)
+                ),
+                contentAlignment = Alignment.Center
             ) {
-                Text(
-                    when {
-                        !available -> "Shizuku غير متصل • اضغط"
-                        !permission -> "الإذن مطلوب • اضغط للمنح"
-                        fileServiceReady -> "Shizuku والإذن فعالان ✓"
-                        fileServiceBinding -> "جارٍ ربط خدمة الملفات..."
-                        fileServiceFailure != null -> "فشل الربط • اضغط لإعادة المحاولة"
-                        else -> "الإذن موجود • اضغط للتحقق"
-                    },
-                    color = if (fileServiceReady) Neon else Amber, fontSize = 10.sp, fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    when {
-                        !available -> "المراقبة: Shizuku متوقف"
-                        !permission -> "المراقبة: بانتظار منح الإذن"
-                        fileServiceReady -> "مراقبة الاتصال والإذن مباشرة"
-                        fileServiceFailure != null -> "الخدمة: " + fileServiceFailure.take(42)
-                        fileServiceBinding -> "اختبار Binder وخدمة الملفات..."
-                        else -> "اضغط لربط خدمة الملفات"
-                    },
-                    color = if (fileServiceReady) Neon else Amber, fontSize = 9.sp
-                )
+                Text("PH", color = Color(0xFF06131B), fontWeight = FontWeight.Black, fontSize = 17.sp)
+            }
+            Spacer(Modifier.width(11.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("CN-PlayHub", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Black)
+                Text("مركز إدارة ونقل الألعاب", color = Color(0xFF94A3B8), fontSize = 10.sp)
+            }
+            Surface(
+                modifier = Modifier.clickable(onClick = onRequestShizuku),
+                color = if (ready) Color(0x2210B981) else Color(0x22F59E0B),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, if (ready) Color(0x5534D399) else Color(0x55FBBF24))
+            ) {
+                Column(Modifier.padding(horizontal = 9.dp, vertical = 7.dp), horizontalAlignment = Alignment.End) {
+                    Text(
+                        when {
+                            ready -> "Shizuku جاهز ✓"
+                            binding -> "جارٍ الربط..."
+                            !available -> "غير متصل"
+                            !permission -> "الإذن مطلوب"
+                            else -> "إعادة التحقق"
+                        },
+                        color = if (ready) Color(0xFF34D399) else Color(0xFFFBBF24),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        when {
+                            ready -> "خدمة الملفات تعمل"
+                            failure != null -> "اضغط لإعادة المحاولة"
+                            else -> "اضغط لفتح الحالة"
+                        },
+                        color = Color(0xFF94A3B8),
+                        fontSize = 8.sp
+                    )
+                }
             }
         }
-        Spacer(Modifier.height(14.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            QuickPill("نسخ USB", "⇄")
-            QuickPill("الوايرلس", "⌁")
-            QuickPill("تقدم إجمالي", "%")
+        Spacer(Modifier.height(11.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            QuickPill("USB", "⇄")
+            QuickPill("SMB", "⌁")
+            QuickPill("نسخ مباشر", "✓")
         }
     }
 }
@@ -1207,8 +1272,8 @@ private fun CopyAddressRow(address: String) {
 @Composable
 private fun AggregateProgressCard(progress: TransferProgress) {
     val hasKnownTotal = progress.totalBytes > 0L || progress.totalFiles > 0
-    Surface(color = Color(0xFF192D20), shape = RoundedCornerShape(21.dp),
-        border = BorderStroke(1.dp, Color(0xFF345A3E)), modifier = Modifier.fillMaxWidth()) {
+    Surface(color = Color(0xFF16243B), shape = RoundedCornerShape(21.dp),
+        border = BorderStroke(1.dp, Color(0xFF2A3550)), modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -1228,7 +1293,7 @@ private fun AggregateProgressCard(progress: TransferProgress) {
                 LinearProgressIndicator(
                     progress = progress.percent / 100f,
                     modifier = Modifier.fillMaxWidth().height(8.dp),
-                    color = Neon, trackColor = Color(0xFF2B4332)
+                    color = Neon, trackColor = Color(0xFF1E2840)
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {

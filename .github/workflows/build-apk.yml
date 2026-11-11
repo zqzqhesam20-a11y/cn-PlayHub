@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/compose-ui-refresh-20261112
   workflow_dispatch:
 
 permissions:
